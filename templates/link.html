@@ -69,7 +69,7 @@
                 mostra("expirado", "Link expirado", "Clique em “Gerar novo link”.");
                 clearInterval(timer);
               } else if (d.estado === "bloqueado") {
-                mostra("bloqueado", "Link bloqueado", "Muitas tentativas inválidas. Gere um novo link.");
+                mostra("bloqueado", "Link bloqueado", "Autenticação inválida. Gere um novo link.");
                 clearInterval(timer);
               } else {
                 mostra("invalido", "Link inválido", "Gere um novo link.");

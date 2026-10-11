@@ -22,7 +22,7 @@ ARQUIVO_USUARIOS = BANCO_DIR / "autenticacao.json"
 ARQUIVO_INTERACOES = BANCO_DIR / "interacoes.json"
 
 CHAVE_PRIVADA_SISTEMA = os.environ.get("PFC_CHAVE_SISTEMA", "chave_secreta_do_middleware_pfc").encode("utf-8")
-LIMIAR_TEMPO_VALIDADE_SEGUNDOS = 300
+LIMIAR_TEMPO_VALIDADE_SEGUNDOS = 30
 LIMIAR_DE_CONFIANCA = reputacao.LIMIAR_DE_CONFIANCA
 
 # Desafios emitidos (nonce -> registro). Em memória: somem ao reiniciar o servidor.
@@ -125,8 +125,8 @@ def processa_mensagem_recebida(remetente_declarado: str, mensagem: str, base_url
 
 # --------------------------------------------------------------------------- Telas / rotas
 # --------------------------------------------------------------------------- Link de autenticação aleatório
-VALIDADE_LINK_SEGUNDOS = 300
-LIMITE_FALHAS_LINK = 5
+VALIDADE_LINK_SEGUNDOS = 30
+LIMITE_FALHAS_LINK = 1
 LINKS = {}   # token -> {"criado", "estado", "nome", "falhas"}; estados: pendente|autenticado|expirado|bloqueado
 TRAVA_LINKS = threading.Lock()
 
@@ -196,7 +196,7 @@ def pagina_autenticacao(token):
                                    mensagem='Link expirado. Gere um novo na página inicial.'), 410
         if reg["estado"] == "bloqueado":
             return render_template('auth.html', visao='indisponivel',
-                                   mensagem='Link bloqueado por tentativas inválidas.'), 403
+                                   mensagem='Link bloqueado por uma autenticação inválida.'), 403
 
         if request.method == 'GET':
             return render_template('auth.html', visao='formulario', token=token)
@@ -212,7 +212,7 @@ def pagina_autenticacao(token):
         if reg["falhas"] >= LIMITE_FALHAS_LINK:
             reg["estado"] = "bloqueado"
             return render_template('auth.html', visao='indisponivel',
-                                   mensagem='Muitas tentativas inválidas. Link bloqueado.'), 403
+                                   mensagem='Autenticação inválida. Link bloqueado.'), 403
         restantes = LIMITE_FALHAS_LINK - reg["falhas"]
         return render_template('auth.html', visao='formulario', token=token,
                                erro=f'Nome ou chave de acesso inválidos. Tentativas restantes: {restantes}.')
