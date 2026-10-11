@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Resultado da verificação</title>
+    {% set cores = {'sucesso': '#10b981', 'alerta': '#f59e0b', 'alerta_fraude': '#ef4444', 'erro': '#ef4444'} %}
+    {% set rotulos = {'sucesso': 'Identidade confirmada', 'alerta': 'Alerta de baixa confiança', 'alerta_fraude': 'Alerta de fraude', 'erro': 'Erro na requisição'} %}
+    {% set cor = cores.get(status, '#94a3b8') %}
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif;
+             background: linear-gradient(135deg, #0b1120, #111827); color: #e5e7eb; }
+      .card { width: min(92vw, 640px); background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(148, 163, 184, 0.18);
+              border-radius: 18px; padding: 30px; margin: 24px 0; }
+      .badge { display: inline-block; border-radius: 999px; padding: 8px 14px; font-weight: bold; margin-bottom: 14px;
+               border: 1px solid {{ cor }}; color: {{ cor }}; }
+      h1 { margin: 0 0 8px; font-size: 1.4rem; }
+      p { color: #cbd5e1; }
+      .nivel { font-size: 2.4rem; font-weight: bold; color: {{ cor }}; margin: 18px 0 6px; }
+      .barra { height: 10px; background: #1e293b; border-radius: 999px; overflow: hidden; }
+      .barra div { height: 100%; background: {{ cor }}; }
+      table { width: 100%; border-collapse: collapse; margin-top: 18px; }
+      td { padding: 8px 4px; border-bottom: 1px solid #1e293b; }
+      td:last-child { text-align: right; font-weight: bold; }
+      ul { padding-left: 18px; color: #cbd5e1; }
+      li { margin-bottom: 6px; }
+      a { color: #7dd3fc; font-weight: bold; text-decoration: none; margin-right: 18px; }
+      .rodape { margin-top: 22px; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="badge">{{ rotulos.get(status, status) }}</div>
+      <h1>{{ mensagem }}</h1>
+      {% if identidade %}<p>Identidade verificada: <strong>{{ identidade }}</strong></p>{% endif %}
+
+      {% if reputacao %}
+        <div class="nivel">{{ reputacao.nivel }}/100 <small style="font-size:1rem">({{ reputacao.classificacao }})</small></div>
+        <div class="barra"><div style="width: {{ reputacao.nivel }}%"></div></div>
+
+        {% set nomes = {'direta': 'Confiança direta (histórico)', 'web_of_trust': 'Web of trust (peers)', 'hierarquica': 'Hierárquica (autoridade)'} %}
+        <table>
+          {% for chave, valor in reputacao.fontes.items() %}
+          <tr><td>{{ nomes[chave] }}</td><td>{{ valor if valor is not none else 'sem dados' }}</td></tr>
+          {% endfor %}
+          <tr><td>Base (fontes disponíveis)</td><td>{{ reputacao.base }}</td></tr>
+          <tr><td>Fator de contexto da mensagem</td><td>×{{ reputacao.fator_contexto }}</td></tr>
+        </table>
+
+        <h3>Por que este nível?</h3>
+        <ul>{% for m in reputacao.motivos %}<li>{{ m }}</li>{% endfor %}</ul>
+      {% endif %}
+
+      <div class="rodape">
+        <a href="/gerar-link">Nova verificação</a>
+        <a href="/painel">Painel</a>
+      </div>
+    </main>
+  </body>
+</html>

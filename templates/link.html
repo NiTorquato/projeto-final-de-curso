@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Autenticação por link</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif;
+             background: linear-gradient(135deg, #0b1120, #111827); color: #e5e7eb; }
+      .card { width: min(92vw, 640px); background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(148, 163, 184, 0.18);
+              border-radius: 18px; padding: 30px; margin: 24px 0; }
+      h1 { margin-top: 0; }
+      p { color: #cbd5e1; }
+      code { display: block; word-break: break-all; background: #0f172a; border-radius: 8px; padding: 12px;
+             margin: 12px 0 14px; color: #7dd3fc; font-size: 0.85rem; }
+      .acoes { display: flex; gap: 10px; flex-wrap: wrap; }
+      .acoes a { text-decoration: none; }
+      button { padding: 12px 16px; border: none; border-radius: 10px; background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+               color: #082f49; font-weight: bold; font-size: 1rem; cursor: pointer; }
+      button.secundario { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; }
+      #estado { margin-top: 22px; padding: 14px 16px; border-radius: 12px; border: 1px solid #334155; background: #0f172a; }
+      #estado.pendente { border-color: #f59e0b; color: #fde68a; }
+      #estado.autenticado { border-color: #10b981; background: rgba(16, 185, 129, 0.1); color: #a7f3d0; }
+      #estado.expirado, #estado.bloqueado, #estado.invalido { border-color: #ef4444; background: rgba(239, 68, 68, 0.1); color: #fecaca; }
+      #estado strong { display: block; font-size: 1.1rem; margin-bottom: 4px; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Autenticação por link</h1>
+      <p>Abra o link abaixo (neste ou em outro dispositivo) e autentique-se. Esta página será avisada quando a autenticação for concluída.</p>
+
+      <code id="link">{{ link }}</code>
+      <div class="acoes">
+        <a id="abrir" href="{{ link }}" target="_blank" rel="noopener"><button type="button">Abrir link</button></a>
+        <button type="button" class="secundario" id="copiar">Copiar link</button>
+        <a href="/"><button type="button" class="secundario">Gerar novo link</button></a>
+      </div>
+
+      <div id="estado" class="pendente">
+        <strong>Aguardando autenticação…</strong>
+        <span id="detalhe">O link expira em {{ validade }}s e só pode ser usado uma vez.</span>
+      </div>
+    </main>
+
+    <script>
+      (function () {
+        var token = {{ token|tojson }};
+        var box = document.getElementById("estado");
+        var timer;
+
+        function mostra(classe, titulo, detalhe) {
+          box.className = classe;
+          box.querySelector("strong").textContent = titulo;
+          document.getElementById("detalhe").textContent = detalhe;
+        }
+
+        function consulta() {
+          fetch("/status/" + encodeURIComponent(token), { cache: "no-store" })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (d.estado === "pendente") {
+                mostra("pendente", "Aguardando autenticação…", "Expira em " + d.restante + "s. Uso único.");
+              } else if (d.estado === "autenticado") {
+                mostra("autenticado", "Autenticação concluída ✔", "Autenticado como " + d.nome + ".");
+                clearInterval(timer);
+              } else if (d.estado === "expirado") {
+                mostra("expirado", "Link expirado", "Clique em “Gerar novo link”.");
+                clearInterval(timer);
+              } else if (d.estado === "bloqueado") {
+                mostra("bloqueado", "Link bloqueado", "Muitas tentativas inválidas. Gere um novo link.");
+                clearInterval(timer);
+              } else {
+                mostra("invalido", "Link inválido", "Gere um novo link.");
+                clearInterval(timer);
+              }
+            })
+            .catch(function () { /* falha de rede momentânea: tenta de novo no próximo ciclo */ });
+        }
+
+        timer = setInterval(consulta, 2000);
+
+        document.getElementById("copiar").addEventListener("click", function () {
+          navigator.clipboard.writeText(document.getElementById("link").textContent).then(function () {
+            document.getElementById("copiar").textContent = "Copiado!";
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "presidente_empresa": {
+    "identidade_i": "id_pres_001",
+    "chave_publica_ch": "pubkey_presidente_12345",
+    "historico": { "interacoes": 40, "confiaveis": 39, "incidentes": 0 },
+    "peers": [
+      { "peer": "gerente_ti", "confianca": 90, "peso": 0.7 },
+      { "peer": "rh", "confianca": 85, "peso": 0.3 }
+    ],
+    "autoridade": { "nome": "Diretório corporativo (OAuth)", "status": "valido" },
+    "dominios_conhecidos": ["empresa.com.br"]
+  },
+  "fornecedor_novo": {
+    "identidade_i": "id_forn_002",
+    "chave_publica_ch": "pubkey_fornecedor_67890",
+    "historico": { "interacoes": 2, "confiaveis": 1, "incidentes": 0 },
+    "peers": [],
+    "autoridade": null,
+    "dominios_conhecidos": ["fornecedor.com"]
+  },
+  "conta_suspeita": {
+    "identidade_i": "id_susp_003",
+    "chave_publica_ch": "pubkey_suspeita_00000",
+    "historico": { "interacoes": 10, "confiaveis": 1, "incidentes": 5 },
+    "peers": [
+      { "peer": "gerente_ti", "confianca": 10, "peso": 0.7 }
+    ],
+    "autoridade": { "nome": "Diretório corporativo (OAuth)", "status": "revogado" },
+    "dominios_conhecidos": []
+  }
+}

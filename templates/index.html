@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif;
+             background: linear-gradient(135deg, #0f172a, #111827); color: #e5e7eb; }
+      .card { width: min(92vw, 440px); background: rgba(17, 24, 39, 0.95); border: 1px solid rgba(148, 163, 184, 0.18);
+              border-radius: 18px; padding: 32px 28px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25); }
+      h1 { margin: 0 0 10px; text-align: center; }
+      p { margin: 0 0 24px; text-align: center; color: #cbd5e1; }
+      label { display: block; margin-bottom: 8px; font-weight: bold; }
+      input[type=text], input[type=password] { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid #334155;
+             background: #0f172a; color: #f8fafc; font-size: 1rem; margin-bottom: 18px; }
+      button { width: 100%; padding: 12px 16px; border: none; border-radius: 10px;
+               background: linear-gradient(135deg, #38bdf8, #0ea5e9); color: #082f49; font-weight: bold; font-size: 1rem; cursor: pointer; }
+      .erro { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35); color: #fecaca;
+              padding: 10px 12px; border-radius: 10px; margin-bottom: 18px; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Login</h1>
+      <p>Digite seu nome e sua chave de acesso.</p>
+
+      {% if erro %}
+      <div class="erro">{{ erro }}</div>
+      {% endif %}
+
+      <form method="POST" action="/login">
+        <input type="hidden" name="next" value="{{ next or '' }}" />
+        <label for="nome">Nome</label>
+        <input id="nome" name="nome" type="text" placeholder="Digite seu nome" required />
+
+        <label for="chave_acesso">Chave de acesso</label>
+        <input id="chave_acesso" name="chave_acesso" type="password" placeholder="Digite a chave de acesso" required />
+
+        <button type="submit">Entrar</button>
+      </form>
+    </main>
+  </body>
+</html>

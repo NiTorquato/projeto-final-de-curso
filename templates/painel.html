@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Painel</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+             background: linear-gradient(135deg, #0b1120, #111827); color: #e5e7eb; font-family: Arial, sans-serif; }
+      .card { width: min(92vw, 520px); background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(148, 163, 184, 0.18);
+              border-radius: 18px; padding: 30px; }
+      h1 { margin-top: 0; }
+      .badge { display: inline-block; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3);
+               color: #a7f3d0; border-radius: 999px; padding: 8px 12px; margin-bottom: 16px; }
+      a { display: inline-block; margin-top: 18px; color: #7dd3fc; font-weight: bold; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="badge">Autenticado</div>
+      <h1>Seja bem-vindo, {{ nome }}!</h1>
+      <p>Você entrou com sucesso na área protegida.</p>
+      <a href="/gerar-link">Verificar uma mensagem recebida</a><br />
+      <a href="/logout">Sair</a>
+    </main>
+  </body>
+</html>

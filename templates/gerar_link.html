@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gerar link de autenticação</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif;
+             background: linear-gradient(135deg, #0b1120, #111827); color: #e5e7eb; }
+      .card { width: min(92vw, 640px); background: rgba(15, 23, 42, 0.95); border: 1px solid rgba(148, 163, 184, 0.18);
+              border-radius: 18px; padding: 30px; margin: 24px 0; }
+      h1 { margin-top: 0; }
+      p { color: #cbd5e1; }
+      label { display: block; margin-bottom: 8px; font-weight: bold; }
+      select, textarea { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid #334155;
+             background: #0f172a; color: #f8fafc; font-size: 1rem; margin-bottom: 18px; font-family: inherit; }
+      textarea { resize: vertical; }
+      button { padding: 12px 16px; border: none; border-radius: 10px; background: linear-gradient(135deg, #38bdf8, #0ea5e9);
+               color: #082f49; font-weight: bold; font-size: 1rem; cursor: pointer; }
+      button.secundario { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; }
+      .erro { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35); color: #fecaca;
+              padding: 10px 12px; border-radius: 10px; margin-bottom: 18px; }
+      .link-box { margin-top: 24px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.3);
+                  border-radius: 12px; padding: 16px; }
+      .link-box code { display: block; word-break: break-all; background: #0f172a; border-radius: 8px; padding: 12px;
+                       margin: 10px 0 14px; color: #a7f3d0; font-size: 0.85rem; }
+      .acoes { display: flex; gap: 10px; flex-wrap: wrap; }
+      .acoes a { text-decoration: none; }
+      .voltar { display: inline-block; margin-top: 22px; color: #7dd3fc; font-weight: bold; text-decoration: none; }
+      #contador { font-weight: bold; color: #fde68a; }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Verificar mensagem recebida</h1>
+      <p>Informe o remetente declarado e o texto da mensagem recebida. O sistema gera um link de verificação único.</p>
+
+      {% if erro %}<div class="erro">{{ erro }}</div>{% endif %}
+
+      <form method="POST" action="/gerar-link">
+        <label for="remetente">Remetente declarado</label>
+        <select id="remetente" name="remetente">
+          {% for r in remetentes %}
+          <option value="{{ r }}" {% if r == remetente %}selected{% endif %}>{{ r }}</option>
+          {% endfor %}
+        </select>
+
+        <label for="mensagem">Mensagem recebida (m)</label>
+        <textarea id="mensagem" name="mensagem" rows="4" placeholder="Cole o texto da mensagem (URLs serão analisadas como contexto)">{{ mensagem or '' }}</textarea>
+
+        <button type="submit">Gerar link</button>
+      </form>
+
+      {% if link %}
+      <section class="link-box">
+        <strong>Link gerado com sucesso</strong>
+        <p style="margin:6px 0 0;">Expira em <span id="contador">{{ validade }}</span>s. Uso único.</p>
+        <code id="link-texto">{{ link }}</code>
+        <div class="acoes">
+          <button type="button" class="secundario" id="copiar">Copiar link</button>
+          <a href="{{ link }}" target="_blank" rel="noopener"><button type="button">Verificar agora</button></a>
+        </div>
+      </section>
+      <script>
+        (function () {
+          var restante = {{ validade }};
+          var el = document.getElementById("contador");
+          var t = setInterval(function () {
+            restante -= 1;
+            if (restante <= 0) { clearInterval(t); el.textContent = "0 (expirado)"; return; }
+            el.textContent = restante;
+          }, 1000);
+          document.getElementById("copiar").addEventListener("click", function () {
+            navigator.clipboard.writeText(document.getElementById("link-texto").textContent).then(function () {
+              document.getElementById("copiar").textContent = "Copiado!";
+            });
+          });
+        })();
+      </script>
+      {% endif %}
+
+      <a class="voltar" href="/painel">&larr; Voltar ao painel</a>
+    </main>
+  </body>
+</html>
