@@ -13,6 +13,9 @@
       .badge { display: inline-block; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3);
                color: #a7f3d0; border-radius: 999px; padding: 8px 12px; margin-bottom: 16px; }
       a { display: inline-block; margin-top: 18px; color: #7dd3fc; font-weight: bold; text-decoration: none; }
+      button { display: inline-block; margin-top: 18px; padding: 12px 16px; border: 0; border-radius: 10px;
+               background: #0ea5e9; color: #082f49; font-weight: bold; font-size: 1rem; cursor: pointer; }
+      #mensagem-passkey { color: #cbd5e1; }
     </style>
   </head>
   <body>
@@ -20,8 +23,81 @@
       <div class="badge">Autenticado</div>
       <h1>Seja bem-vindo, {{ nome }}!</h1>
       <p>Você entrou com sucesso na área protegida.</p>
+      <p>{% if tem_passkey %}Você já tem uma passkey cadastrada.{% else %}Cadastre uma passkey para entrar sem digitar sua chave.{% endif %}</p>
+      <button id="cadastrar-passkey" type="button">Cadastrar outra passkey</button>
+      <p id="mensagem-passkey" role="status" aria-live="polite"></p>
       <a href="/gerar-link">Verificar uma mensagem recebida</a><br />
       <a href="/logout">Sair</a>
     </main>
+    <script>
+      const botao = document.getElementById("cadastrar-passkey");
+      const mensagem = document.getElementById("mensagem-passkey");
+
+      function decodificaBase64Url(valor) {
+        const base64 = valor.replace(/-/g, "+").replace(/_/g, "/");
+        const binario = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
+        return Uint8Array.from(binario, caractere => caractere.charCodeAt(0));
+      }
+
+      function codificaBase64Url(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binario = "";
+        bytes.forEach(byte => { binario += String.fromCharCode(byte); });
+        return btoa(binario).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+      }
+
+      botao.addEventListener("click", async () => {
+        if (!window.PublicKeyCredential || !navigator.credentials) {
+          mensagem.textContent = "Este navegador não oferece suporte a passkeys.";
+          return;
+        }
+        botao.disabled = true;
+        mensagem.textContent = "Aguardando a confirmação da passkey...";
+        try {
+          const opcoesResposta = await fetch("/webauthn/cadastro/opcoes", { method: "POST" });
+          const opcoes = await opcoesResposta.json();
+          if (!opcoesResposta.ok) throw new Error(opcoes.erro || "Não foi possível iniciar o cadastro.");
+
+          opcoes.publicKey.challenge = decodificaBase64Url(opcoes.publicKey.challenge);
+          opcoes.publicKey.user.id = decodificaBase64Url(opcoes.publicKey.user.id);
+          opcoes.publicKey.excludeCredentials = opcoes.publicKey.excludeCredentials.map(item => ({
+            ...item,
+            id: decodificaBase64Url(item.id)
+          }));
+          const credencial = await navigator.credentials.create({ publicKey: opcoes.publicKey });
+          if (!credencial) throw new Error("O cadastro foi cancelado.");
+
+          const resposta = credencial.response;
+          const verificacaoResposta = await fetch("/webauthn/cadastro/verificar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              challenge_id: opcoes.challenge_id,
+              credential: {
+                id: credencial.id,
+                rawId: codificaBase64Url(credencial.rawId),
+                type: credencial.type,
+                authenticatorAttachment: credencial.authenticatorAttachment,
+                clientExtensionResults: credencial.getClientExtensionResults(),
+                response: {
+                  attestationObject: codificaBase64Url(resposta.attestationObject),
+                  clientDataJSON: codificaBase64Url(resposta.clientDataJSON),
+                  transports: resposta.getTransports ? resposta.getTransports() : []
+                }
+              }
+            })
+          });
+          const verificacao = await verificacaoResposta.json();
+          if (!verificacaoResposta.ok) throw new Error(verificacao.erro || "Não foi possível cadastrar a passkey.");
+          mensagem.textContent = verificacao.mensagem;
+          window.location.reload();
+        } catch (erro) {
+          mensagem.textContent = erro.name === "NotAllowedError"
+            ? "Cadastro cancelado ou não aprovado."
+            : erro.message;
+          botao.disabled = false;
+        }
+      });
+    </script>
   </body>
 </html>

@@ -12,13 +12,12 @@
               border-radius: 18px; padding: 32px 28px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25); }
       h1 { margin: 0 0 10px; text-align: center; }
       p { margin: 0 0 24px; text-align: center; color: #cbd5e1; }
-      label { display: block; margin-bottom: 8px; font-weight: bold; }
-      input { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid #334155; background: #0f172a;
-              color: #f8fafc; font-size: 1rem; margin-bottom: 18px; }
       button { width: 100%; padding: 12px 16px; border: none; border-radius: 10px;
                background: linear-gradient(135deg, #38bdf8, #0ea5e9); color: #082f49; font-weight: bold; font-size: 1rem; cursor: pointer; }
+      button:disabled { opacity: 0.65; cursor: wait; }
       .erro { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35); color: #fecaca;
               padding: 10px 12px; border-radius: 10px; margin-bottom: 18px; }
+      .mensagem { min-height: 1.25rem; margin-top: 16px; }
       .ok { background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #a7f3d0;
             padding: 14px; border-radius: 12px; text-align: center; }
     </style>
@@ -27,15 +26,13 @@
     <main class="card">
       {% if visao == 'formulario' %}
         <h1>Autenticação</h1>
-        <p>Digite seu nome e sua chave de acesso.</p>
-        {% if erro %}<div class="erro">{{ erro }}</div>{% endif %}
-        <form method="POST" action="/auth/{{ token }}">
-          <label for="nome">Nome</label>
-          <input id="nome" name="nome" type="text" placeholder="Digite seu nome" required />
-          <label for="chave_acesso">Chave de acesso</label>
-          <input id="chave_acesso" name="chave_acesso" type="password" placeholder="Digite a chave de acesso" required />
-          <button type="submit">Autenticar</button>
-        </form>
+        {% if tem_passkey %}
+          <p>Confirme com sua passkey, como Windows Hello, Face ID, Touch ID ou uma chave de segurança.</p>
+          <button id="autenticar-passkey" type="button">Autenticar com passkey</button>
+          <p id="mensagem" class="mensagem" role="status" aria-live="polite"></p>
+        {% else %}
+          <div class="erro">Nenhuma passkey foi cadastrada. Entre no painel com a chave atual, cadastre uma passkey e gere um novo link de autenticação.</div>
+        {% endif %}
       {% elif visao == 'concluido' %}
         <h1>Autenticação concluída</h1>
         <div class="ok">Olá, {{ nome }}. A página que gerou este link foi avisada. Você já pode fechar esta janela.</div>
@@ -44,5 +41,93 @@
         <div class="erro">{{ mensagem }}</div>
       {% endif %}
     </main>
+    {% if visao == 'formulario' and tem_passkey %}
+    <script>
+      const token = {{ token|tojson }};
+      const botao = document.getElementById("autenticar-passkey");
+      const mensagem = document.getElementById("mensagem");
+
+      function decodificaBase64Url(valor) {
+        const base64 = valor.replace(/-/g, "+").replace(/_/g, "/");
+        const binario = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
+        return Uint8Array.from(binario, caractere => caractere.charCodeAt(0));
+      }
+
+      function codificaBase64Url(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binario = "";
+        bytes.forEach(byte => { binario += String.fromCharCode(byte); });
+        return btoa(binario).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+      }
+
+      function serializaCredencial(credencial) {
+        const resposta = credencial.response;
+        return {
+          id: credencial.id,
+          rawId: codificaBase64Url(credencial.rawId),
+          type: credencial.type,
+          authenticatorAttachment: credencial.authenticatorAttachment,
+          clientExtensionResults: credencial.getClientExtensionResults(),
+          response: {
+            authenticatorData: codificaBase64Url(resposta.authenticatorData),
+            clientDataJSON: codificaBase64Url(resposta.clientDataJSON),
+            signature: codificaBase64Url(resposta.signature),
+            userHandle: resposta.userHandle ? codificaBase64Url(resposta.userHandle) : null
+          }
+        };
+      }
+
+      botao.addEventListener("click", async () => {
+        if (!window.PublicKeyCredential || !navigator.credentials) {
+          mensagem.textContent = "Este navegador não oferece suporte a passkeys.";
+          return;
+        }
+        botao.disabled = true;
+        mensagem.textContent = "Aguardando a confirmação no Windows Hello ou em outro autenticador...";
+        try {
+          const opcoesResposta = await fetch(`/auth/${encodeURIComponent(token)}/webauthn/opcoes`, {
+            method: "POST"
+          });
+          const opcoes = await opcoesResposta.json();
+          if (!opcoesResposta.ok) throw new Error(opcoes.erro || "Não foi possível iniciar a autenticação.");
+
+          opcoes.publicKey.challenge = decodificaBase64Url(opcoes.publicKey.challenge);
+          opcoes.publicKey.allowCredentials = opcoes.publicKey.allowCredentials.map(item => ({
+            ...item,
+            id: decodificaBase64Url(item.id)
+          }));
+          const credencial = await navigator.credentials.get({ publicKey: opcoes.publicKey });
+          if (!credencial) throw new Error("A autenticação foi cancelada.");
+
+          const verificacaoResposta = await fetch(
+            `/auth/${encodeURIComponent(token)}/webauthn/verificar`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                challenge_id: opcoes.challenge_id,
+                credential: serializaCredencial(credencial)
+              })
+            }
+          );
+          const verificacao = await verificacaoResposta.json();
+          if (!verificacaoResposta.ok) throw new Error(verificacao.erro || "A autenticação falhou.");
+          const cartao = document.querySelector(".card");
+          cartao.replaceChildren();
+          const titulo = document.createElement("h1");
+          titulo.textContent = "Autenticação concluída";
+          const confirmacao = document.createElement("div");
+          confirmacao.className = "ok";
+          confirmacao.textContent = `Olá, ${verificacao.nome}. A página que gerou este link foi avisada. Você já pode fechar esta janela.`;
+          cartao.append(titulo, confirmacao);
+        } catch (erro) {
+          mensagem.textContent = erro.name === "NotAllowedError"
+            ? "Autenticação cancelada ou não aprovada."
+            : erro.message;
+          botao.disabled = false;
+        }
+      });
+    </script>
+    {% endif %}
   </body>
 </html>

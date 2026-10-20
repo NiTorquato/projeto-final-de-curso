@@ -26,6 +26,21 @@ class BaseTestCase(unittest.TestCase):
 class LinkAleatorioTestCase(BaseTestCase):
     """Página 1 gera link aleatório -> página 2 autentica -> página 1 é informada."""
 
+    def setUp(self):
+        super().setUp()
+        self.passkeys_originais = main.PASSKEYS.copy()
+        main.PASSKEYS[:] = [{
+            'nome': 'presidente marquinhos',
+            'credential_id': main.bytes_para_base64url(b'link-credential'),
+            'credential_public_key': main.bytes_para_base64url(b'link-public-key'),
+            'sign_count': 0,
+        }]
+        main.DESAFIOS_WEBAUTHN.clear()
+
+    def tearDown(self):
+        main.PASSKEYS[:] = self.passkeys_originais
+        main.DESAFIOS_WEBAUTHN.clear()
+
     def novo_link(self):
         import re
         r = self.client.get('/')
@@ -37,8 +52,31 @@ class LinkAleatorioTestCase(BaseTestCase):
     def status(self, token):
         return self.client.get('/status/' + token).get_json()
 
-    def autentica(self, token, nome='presidente marquinhos', chave='marquinhos do grau'):
-        return self.client.post('/auth/' + token, data={'nome': nome, 'chave_acesso': chave})
+    def autentica(self, token, valida=True):
+        desafio = main.cria_desafio_webauthn(
+            'autenticacao_link', b'desafio-link', token_link=token
+        )
+        credential_id = main.PASSKEYS[0]['credential_id']
+        resposta = {
+            'challenge_id': desafio,
+            'credential': {
+                'id': credential_id,
+                'rawId': credential_id,
+                'type': 'public-key',
+            },
+        }
+        retorno_verificacao = mock.Mock(new_sign_count=1)
+        falha = main.WebAuthnException('assinatura inválida')
+        with mock.patch.object(
+            main,
+            'verify_authentication_response',
+            return_value=retorno_verificacao if valida else None,
+            side_effect=None if valida else falha,
+        ), mock.patch.object(main, 'salvar_passkeys'):
+            return self.client.post(
+                '/auth/' + token + '/webauthn/verificar',
+                json=resposta,
+            )
 
     def test_cada_carregamento_gera_link_diferente_e_longo(self):
         a, b = self.novo_link(), self.novo_link()
@@ -48,7 +86,8 @@ class LinkAleatorioTestCase(BaseTestCase):
     def test_link_abre_pagina_de_autenticacao(self):
         r = self.client.get('/auth/' + self.novo_link())
         self.assertEqual(r.status_code, 200)
-        self.assertIn(b'Chave de acesso', r.data)
+        self.assertIn(b'Windows Hello', r.data)
+        self.assertNotIn(b'name="chave_acesso"', r.data)
 
     def test_inicia_pendente(self):
         self.assertEqual(self.status(self.novo_link())['estado'], 'pendente')
@@ -56,23 +95,23 @@ class LinkAleatorioTestCase(BaseTestCase):
     def test_autenticacao_informa_primeira_pagina(self):
         token = self.novo_link()
         r = self.autentica(token)
-        self.assertIn('Autenticação concluída'.encode(), r.data)
+        self.assertEqual(r.get_json()['nome'], 'presidente marquinhos')
         st = self.status(token)
         self.assertEqual(st['estado'], 'autenticado')
         self.assertEqual(st['nome'], 'presidente marquinhos')
 
-    def test_credenciais_erradas_mantem_pendente(self):
+    def test_passkey_invalida_bloqueia_link(self):
         token = self.novo_link()
-        r = self.autentica(token, chave='errada')
-        self.assertIn(b'Tentativas restantes: 4', r.data)
-        self.assertEqual(self.status(token)['estado'], 'pendente')
+        r = self.autentica(token, valida=False)
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(self.status(token)['estado'], 'bloqueado')
 
     def test_bloqueia_apos_tentativas_invalidas(self):
         token = self.novo_link()
         for _ in range(main.LIMITE_FALHAS_LINK):
-            self.autentica(token, chave='errada')
+            self.autentica(token, valida=False)
         self.assertEqual(self.status(token)['estado'], 'bloqueado')
-        self.autentica(token)  # mesmo com a senha certa, continua bloqueado
+        self.autentica(token)  # mesmo uma assinatura válida não pode reutilizar link bloqueado
         self.assertEqual(self.status(token)['estado'], 'bloqueado')
 
     def test_link_e_de_uso_unico(self):
@@ -90,6 +129,16 @@ class LinkAleatorioTestCase(BaseTestCase):
             self.assertEqual(self.client.get('/auth/' + token).status_code, 410)
             self.autentica(token)
             self.assertEqual(self.status(token)['estado'], 'expirado')
+
+    def test_link_sem_passkey_cadastrada_nao_pede_senha(self):
+        main.PASSKEYS.clear()
+        token = self.novo_link()
+        pagina = self.client.get('/auth/' + token)
+        self.assertEqual(pagina.status_code, 200)
+        self.assertIn(b'Nenhuma passkey foi cadastrada', pagina.data)
+        self.assertNotIn(b'name="chave_acesso"', pagina.data)
+        resposta = self.client.post('/auth/' + token + '/webauthn/opcoes')
+        self.assertEqual(resposta.status_code, 409)
 
     def test_token_inexistente(self):
         self.assertEqual(self.client.get('/auth/inventado').status_code, 404)
@@ -233,6 +282,126 @@ class ReputacaoTestCase(unittest.TestCase):
     def test_dominio_parecido_e_penalizado(self):
         f, _ = reputacao.avalia_contexto({"urls": ["https://empresa.com.br.golpe.xyz/x"]}, ["empresa.com.br"])
         self.assertLess(f, 1.0)
+
+
+class WebAuthnTestCase(BaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.passkeys_originais = main.PASSKEYS.copy()
+        main.PASSKEYS.clear()
+        main.DESAFIOS_WEBAUTHN.clear()
+
+    def tearDown(self):
+        main.PASSKEYS[:] = self.passkeys_originais
+        main.DESAFIOS_WEBAUTHN.clear()
+
+    def test_opcoes_de_login_sem_passkey_exibem_instrucao(self):
+        resposta = self.client.post('/webauthn/autenticacao/opcoes')
+        self.assertEqual(resposta.status_code, 409)
+        self.assertIn('cadastre uma passkey', resposta.get_json()['erro'])
+
+    @mock.patch.object(main, 'options_to_json', return_value='{}')
+    @mock.patch.object(main, 'generate_authentication_options')
+    def test_login_com_passkey_valida_desafio_e_inicia_sessao(
+        self, gerar_opcoes, _options_to_json
+    ):
+        gerar_opcoes.return_value.challenge = b'desafio-autenticacao'
+        main.PASSKEYS.append({
+            'nome': 'presidente marquinhos',
+            'credential_id': main.bytes_para_base64url(b'credencial'),
+            'credential_public_key': main.bytes_para_base64url(b'chave-publica'),
+            'sign_count': 0,
+        })
+        resposta_opcoes = self.client.post('/webauthn/autenticacao/opcoes')
+        self.assertEqual(resposta_opcoes.status_code, 200)
+        dados_opcoes = resposta_opcoes.get_json()
+        self.assertIn(dados_opcoes['challenge_id'], main.DESAFIOS_WEBAUTHN)
+
+        with mock.patch.object(
+            main, 'verify_authentication_response',
+            return_value=mock.Mock(new_sign_count=1),
+        ) as verificar, mock.patch.object(main, 'salvar_passkeys'):
+            resposta_login = self.client.post(
+                '/webauthn/autenticacao/verificar',
+                json={
+                    'challenge_id': dados_opcoes['challenge_id'],
+                    'credential': {
+                        'id': main.PASSKEYS[0]['credential_id'],
+                        'rawId': main.PASSKEYS[0]['credential_id'],
+                        'type': 'public-key',
+                    },
+                    'next': '/verify?id=1',
+                },
+            )
+
+        self.assertEqual(resposta_login.status_code, 200)
+        self.assertEqual(resposta_login.get_json()['redirect'], '/verify?id=1')
+        self.assertEqual(verificar.call_args.kwargs['expected_challenge'], b'desafio-autenticacao')
+        with self.client.session_transaction() as sessao:
+            self.assertEqual(sessao['nome'], 'presidente marquinhos')
+
+        repetida = self.client.post(
+            '/webauthn/autenticacao/verificar',
+            json={
+                'challenge_id': dados_opcoes['challenge_id'],
+                'credential': {
+                    'id': main.PASSKEYS[0]['credential_id'],
+                    'rawId': main.PASSKEYS[0]['credential_id'],
+                    'type': 'public-key',
+                },
+            },
+        )
+        self.assertEqual(repetida.status_code, 400)
+
+    def test_login_por_senha_e_bloqueado_depois_do_cadastro(self):
+        main.PASSKEYS.append({
+            'nome': 'presidente marquinhos',
+            'credential_id': 'id-cadastrado',
+            'credential_public_key': 'chave-publica',
+            'sign_count': 0,
+        })
+        resposta = self.client.post(
+            '/login',
+            data={'nome': 'presidente marquinhos', 'chave_acesso': 'marquinhos do grau'},
+        )
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIn('configurada para entrar com passkey'.encode(), resposta.data)
+        self.assertNotIn(b'name="chave_acesso"', resposta.data)
+
+    @mock.patch.object(main, 'options_to_json', return_value='{}')
+    @mock.patch.object(main, 'generate_registration_options')
+    def test_cadastro_de_passkey_exige_sessao_e_persiste_credencial(
+        self, gerar_opcoes, _options_to_json
+    ):
+        self.assertEqual(self.client.post('/webauthn/cadastro/opcoes').status_code, 401)
+        self.login()
+
+        gerar_opcoes.return_value.challenge = b'desafio-cadastro'
+        resposta_opcoes = self.client.post('/webauthn/cadastro/opcoes')
+        self.assertEqual(resposta_opcoes.status_code, 200)
+        challenge_id = resposta_opcoes.get_json()['challenge_id']
+
+        with mock.patch.object(
+            main, 'verify_registration_response',
+            return_value=mock.Mock(
+                credential_id=b'nova-credencial',
+                credential_public_key=b'chave-publica',
+                sign_count=0,
+            ),
+        ) as verificar, mock.patch.object(main, 'salvar_passkeys') as salvar:
+            resposta = self.client.post(
+                '/webauthn/cadastro/verificar',
+                json={
+                    'challenge_id': challenge_id,
+                    'credential': {'id': 'nova-credencial'},
+                },
+            )
+
+        self.assertEqual(resposta.status_code, 201)
+        self.assertEqual(verificar.call_args.kwargs['expected_challenge'], b'desafio-cadastro')
+        self.assertEqual(main.PASSKEYS[0]['nome'], 'presidente marquinhos')
+        self.assertEqual(main.PASSKEYS[0]['credential_id'], main.bytes_para_base64url(b'nova-credencial'))
+        salvar.assert_called_once()
 
 
 if __name__ == '__main__':

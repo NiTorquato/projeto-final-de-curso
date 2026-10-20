@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import json
@@ -6,11 +7,26 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 import reputacao
+from webauthn import (
+    base64url_to_bytes,
+    generate_authentication_options,
+    generate_registration_options,
+    options_to_json,
+    verify_authentication_response,
+    verify_registration_response,
+)
+from webauthn.helpers.exceptions import WebAuthnException
+from webauthn.helpers.structs import (
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PFC_SECRET_KEY", "chave-secreta-do-projeto")
@@ -20,14 +36,18 @@ BANCO_DIR = BASE_DIR / "Banco"
 BANCO_DIR.mkdir(exist_ok=True)
 ARQUIVO_USUARIOS = BANCO_DIR / "autenticacao.json"
 ARQUIVO_INTERACOES = BANCO_DIR / "interacoes.json"
+ARQUIVO_PASSKEYS = BANCO_DIR / "passkeys.json"
 
 CHAVE_PRIVADA_SISTEMA = os.environ.get("PFC_CHAVE_SISTEMA", "chave_secreta_do_middleware_pfc").encode("utf-8")
 LIMIAR_TEMPO_VALIDADE_SEGUNDOS = 30
 LIMIAR_DE_CONFIANCA = reputacao.LIMIAR_DE_CONFIANCA
+VALIDADE_DESAFIO_WEBAUTHN_SEGUNDOS = 300
 
 # Desafios emitidos (nonce -> registro). Em memória: somem ao reiniciar o servidor.
 DESAFIOS = {}
 TRAVA_DESAFIOS = threading.Lock()
+DESAFIOS_WEBAUTHN = {}
+TRAVA_WEBAUTHN = threading.Lock()
 
 
 # --------------------------------------------------------------------------- Banco
@@ -55,6 +75,87 @@ def carregar_interacoes():
 
 USUARIOS = carregar_usuarios()
 BANCO_DE_DADOS_INTERACOES = carregar_interacoes()
+
+
+def carregar_passkeys():
+    if not ARQUIVO_PASSKEYS.exists():
+        return []
+    dados = json.loads(ARQUIVO_PASSKEYS.read_text(encoding="utf-8"))
+    if not isinstance(dados, list) or not all(isinstance(item, dict) for item in dados):
+        raise ValueError(f"Formato inválido no arquivo de passkeys: {ARQUIVO_PASSKEYS}")
+    return dados
+
+
+PASSKEYS = carregar_passkeys()
+
+
+def salvar_passkeys():
+    ARQUIVO_PASSKEYS.write_text(
+        json.dumps(PASSKEYS, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def bytes_para_base64url(valor: bytes) -> str:
+    return base64.urlsafe_b64encode(valor).rstrip(b"=").decode("ascii")
+
+
+def configuracao_webauthn():
+    origin = os.environ.get("PFC_WEBAUTHN_ORIGIN", request.host_url.rstrip("/"))
+    rp_id = os.environ.get("PFC_WEBAUTHN_RP_ID") or urlparse(origin).hostname
+    if not rp_id:
+        raise RuntimeError("Não foi possível determinar o RP ID do WebAuthn.")
+    return rp_id, origin
+
+
+def cria_desafio_webauthn(
+    tipo: str, challenge: bytes, nome: str = "", token_link: str = ""
+) -> str:
+    agora = obtem_tempo_atual()
+    challenge_id = secrets.token_urlsafe(32)
+    with TRAVA_WEBAUTHN:
+        expirados = [
+            identificador for identificador, registro in DESAFIOS_WEBAUTHN.items()
+            if agora - registro["criado"] > VALIDADE_DESAFIO_WEBAUTHN_SEGUNDOS
+        ]
+        for identificador in expirados:
+            del DESAFIOS_WEBAUTHN[identificador]
+        DESAFIOS_WEBAUTHN[challenge_id] = {
+            "tipo": tipo,
+            "challenge": bytes_para_base64url(challenge),
+            "nome": nome,
+            "token_link": token_link,
+            "criado": agora,
+        }
+    return challenge_id
+
+
+def consome_desafio_webauthn(challenge_id: str, tipo: str):
+    with TRAVA_WEBAUTHN:
+        registro = DESAFIOS_WEBAUTHN.pop(challenge_id, None)
+    if registro is None or registro["tipo"] != tipo:
+        return None
+    if obtem_tempo_atual() - registro["criado"] > VALIDADE_DESAFIO_WEBAUTHN_SEGUNDOS:
+        return None
+    return registro
+
+
+def redirecionamento_apos_login(destino: str):
+    if destino.startswith("/verify?"):
+        return redirect(destino)
+    return redirect(url_for("painel"))
+
+
+def resposta_webauthn_erro(mensagem: str, status: int):
+    return jsonify({"erro": mensagem}), status
+
+
+def registra_falha_link(token: str):
+    with TRAVA_LINKS:
+        reg = registro_do_link(token)
+        if reg is not None and reg["estado"] == "pendente":
+            reg["falhas"] += 1
+            if reg["falhas"] >= LIMITE_FALHAS_LINK:
+                reg["estado"] = "bloqueado"
 
 
 def busca_registro_por_identidade(i: str):
@@ -181,9 +282,9 @@ def status_link(token):
     return resp
 
 
-@app.route('/auth/<token>', methods=['GET', 'POST'])
+@app.route('/auth/<token>')
 def pagina_autenticacao(token):
-    """Página 2: aberta pelo link; pede nome e chave e, se corretos, conclui a autenticação."""
+    """Página 2: aberta pelo link; exige passkey para concluir a autenticação."""
     with TRAVA_LINKS:
         reg = registro_do_link(token)
         if reg is None:
@@ -198,29 +299,109 @@ def pagina_autenticacao(token):
             return render_template('auth.html', visao='indisponivel',
                                    mensagem='Link bloqueado por uma autenticação inválida.'), 403
 
-        if request.method == 'GET':
-            return render_template('auth.html', visao='formulario', token=token)
+        return render_template(
+            'auth.html',
+            visao='formulario',
+            token=token,
+            tem_passkey=bool(PASSKEYS),
+        )
 
-        nome = request.form.get('nome', '').strip()
-        chave = request.form.get('chave_acesso', '').strip()
-        if nome and chave and credenciais_validas(nome, chave):
-            reg["estado"] = "autenticado"
-            reg["nome"] = nome
-            return render_template('auth.html', visao='concluido', nome=nome)
 
-        reg["falhas"] += 1
-        if reg["falhas"] >= LIMITE_FALHAS_LINK:
-            reg["estado"] = "bloqueado"
-            return render_template('auth.html', visao='indisponivel',
-                                   mensagem='Autenticação inválida. Link bloqueado.'), 403
-        restantes = LIMITE_FALHAS_LINK - reg["falhas"]
-        return render_template('auth.html', visao='formulario', token=token,
-                               erro=f'Nome ou chave de acesso inválidos. Tentativas restantes: {restantes}.')
+@app.route('/auth/<token>/webauthn/opcoes', methods=['POST'])
+def opcoes_autenticacao_link(token):
+    with TRAVA_LINKS:
+        reg = registro_do_link(token)
+        if reg is None or reg["estado"] != "pendente":
+            return resposta_webauthn_erro("Link inválido, expirado ou já utilizado.", 410)
+
+    if not PASSKEYS:
+        return resposta_webauthn_erro(
+            "Nenhuma passkey cadastrada. Entre pelo painel, cadastre uma passkey e gere um novo link.",
+            409,
+        )
+
+    rp_id, _ = configuracao_webauthn()
+    opcoes = generate_authentication_options(
+        rp_id=rp_id,
+        allow_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(passkey["credential_id"]))
+            for passkey in PASSKEYS
+        ],
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    challenge_id = cria_desafio_webauthn(
+        "autenticacao_link", opcoes.challenge, token_link=token
+    )
+    return jsonify({
+        "challenge_id": challenge_id,
+        "publicKey": json.loads(options_to_json(opcoes)),
+    })
+
+
+@app.route('/auth/<token>/webauthn/verificar', methods=['POST'])
+def verificar_autenticacao_link(token):
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict) or not isinstance(dados.get("credential"), dict):
+        return resposta_webauthn_erro("Resposta WebAuthn inválida.", 400)
+
+    challenge_id = str(dados.get("challenge_id", ""))
+    with TRAVA_WEBAUTHN:
+        desafio = DESAFIOS_WEBAUTHN.pop(challenge_id, None)
+    if (
+        desafio is None
+        or desafio["tipo"] != "autenticacao_link"
+        or desafio["token_link"] != token
+        or obtem_tempo_atual() - desafio["criado"] > VALIDADE_DESAFIO_WEBAUTHN_SEGUNDOS
+    ):
+        return resposta_webauthn_erro("Desafio inválido, expirado ou já utilizado.", 400)
+
+    credential = dados["credential"]
+    credential_id = credential.get("rawId")
+    if credential.get("type") != "public-key" or credential.get("id") != credential_id:
+        registra_falha_link(token)
+        return resposta_webauthn_erro("Resposta WebAuthn inválida.", 400)
+    passkey = next(
+        (item for item in PASSKEYS if item["credential_id"] == credential_id),
+        None,
+    )
+    if passkey is None:
+        registra_falha_link(token)
+        return resposta_webauthn_erro("Passkey não reconhecida.", 401)
+
+    rp_id, origin = configuracao_webauthn()
+    try:
+        verificacao = verify_authentication_response(
+            credential=credential,
+            expected_challenge=base64url_to_bytes(desafio["challenge"]),
+            expected_rp_id=rp_id,
+            expected_origin=origin,
+            credential_public_key=base64url_to_bytes(passkey["credential_public_key"]),
+            credential_current_sign_count=passkey["sign_count"],
+            require_user_verification=True,
+        )
+    except (WebAuthnException, ValueError, TypeError, KeyError):
+        registra_falha_link(token)
+        return resposta_webauthn_erro("A autenticação com passkey falhou.", 401)
+
+    with TRAVA_LINKS:
+        reg = registro_do_link(token)
+        if reg is None or reg["estado"] != "pendente":
+            return resposta_webauthn_erro("Link inválido, expirado ou já utilizado.", 410)
+        reg["estado"] = "autenticado"
+        reg["nome"] = passkey["nome"]
+
+    passkey["sign_count"] = verificacao.new_sign_count
+    salvar_passkeys()
+    return jsonify({"nome": passkey["nome"]})
 
 
 @app.route('/entrar')
 def index():
-    return render_template('index.html', next=request.args.get('next', ''))
+    return render_template(
+        'index.html',
+        next=request.args.get('next', ''),
+        tem_passkey=bool(PASSKEYS),
+    )
 
 
 @app.route('/login', methods=['POST'])
@@ -229,16 +410,175 @@ def login():
     chave_acesso = request.form.get('chave_acesso', '').strip()
     destino = request.form.get('next', '')
 
+    if PASSKEYS:
+        return render_template(
+            'index.html',
+            erro='Esta conta já está configurada para entrar com passkey.',
+            next=destino,
+            tem_passkey=True,
+        )
     if not nome or not chave_acesso:
-        return render_template('index.html', erro='Preencha o nome e a chave de acesso.', next=destino)
+        return render_template(
+            'index.html',
+            erro='Preencha o nome e a chave de acesso.',
+            next=destino,
+            tem_passkey=False,
+        )
 
     if not credenciais_validas(nome, chave_acesso):
-        return render_template('index.html', erro='Nome ou chave de acesso inválidos.', next=destino)
+        return render_template(
+            'index.html',
+            erro='Nome ou chave de acesso inválidos.',
+            next=destino,
+            tem_passkey=False,
+        )
 
+    session.clear()
     session['nome'] = nome
-    if destino.startswith('/verify?'):   # só aceita destino interno de verificação
-        return redirect(destino)
-    return redirect(url_for('painel'))
+    return redirecionamento_apos_login(destino)
+
+
+@app.route('/webauthn/autenticacao/opcoes', methods=['POST'])
+def opcoes_autenticacao_webauthn():
+    if not PASSKEYS:
+        return resposta_webauthn_erro(
+            "Nenhuma passkey cadastrada. Entre com sua chave atual e cadastre uma passkey no painel.",
+            409,
+        )
+
+    rp_id, _ = configuracao_webauthn()
+    opcoes = generate_authentication_options(
+        rp_id=rp_id,
+        allow_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(passkey["credential_id"]))
+            for passkey in PASSKEYS
+        ],
+        user_verification=UserVerificationRequirement.REQUIRED,
+    )
+    challenge_id = cria_desafio_webauthn("autenticacao", opcoes.challenge)
+    return jsonify({
+        "challenge_id": challenge_id,
+        "publicKey": json.loads(options_to_json(opcoes)),
+    })
+
+
+@app.route('/webauthn/autenticacao/verificar', methods=['POST'])
+def verificar_autenticacao_webauthn():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict) or not isinstance(dados.get("credential"), dict):
+        return resposta_webauthn_erro("Resposta WebAuthn inválida.", 400)
+
+    desafio = consome_desafio_webauthn(
+        str(dados.get("challenge_id", "")), "autenticacao"
+    )
+    if desafio is None:
+        return resposta_webauthn_erro("Desafio inválido, expirado ou já utilizado.", 400)
+
+    credential = dados["credential"]
+    credential_id = credential.get("rawId")
+    if credential.get("type") != "public-key" or credential.get("id") != credential_id:
+        return resposta_webauthn_erro("Resposta WebAuthn inválida.", 400)
+    passkey = next(
+        (item for item in PASSKEYS if item["credential_id"] == credential_id),
+        None,
+    )
+    if passkey is None:
+        return resposta_webauthn_erro("Passkey não reconhecida.", 401)
+
+    rp_id, origin = configuracao_webauthn()
+    try:
+        verificacao = verify_authentication_response(
+            credential=credential,
+            expected_challenge=base64url_to_bytes(desafio["challenge"]),
+            expected_rp_id=rp_id,
+            expected_origin=origin,
+            credential_public_key=base64url_to_bytes(passkey["credential_public_key"]),
+            credential_current_sign_count=passkey["sign_count"],
+            require_user_verification=True,
+        )
+    except (WebAuthnException, ValueError, TypeError, KeyError):
+        return resposta_webauthn_erro("A autenticação com passkey falhou.", 401)
+
+    passkey["sign_count"] = verificacao.new_sign_count
+    salvar_passkeys()
+    session.clear()
+    session["nome"] = passkey["nome"]
+    destino = str(dados.get("next", ""))
+    if destino.startswith("/verify?"):
+        proxima_url = destino
+    else:
+        proxima_url = url_for("painel")
+    return jsonify({"redirect": proxima_url})
+
+
+@app.route('/webauthn/cadastro/opcoes', methods=['POST'])
+def opcoes_cadastro_webauthn():
+    nome = session.get("nome")
+    if not nome:
+        return resposta_webauthn_erro("Entre antes de cadastrar uma passkey.", 401)
+
+    rp_id, _ = configuracao_webauthn()
+    opcoes = generate_registration_options(
+        rp_id=rp_id,
+        rp_name="PFC",
+        user_id=hashlib.sha256(f"pfc:{nome}".encode("utf-8")).digest(),
+        user_name=nome,
+        user_display_name=nome,
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.REQUIRED,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        ),
+        exclude_credentials=[
+            PublicKeyCredentialDescriptor(id=base64url_to_bytes(item["credential_id"]))
+            for item in PASSKEYS
+            if item["nome"] == nome
+        ],
+    )
+    challenge_id = cria_desafio_webauthn("cadastro", opcoes.challenge, nome)
+    return jsonify({
+        "challenge_id": challenge_id,
+        "publicKey": json.loads(options_to_json(opcoes)),
+    })
+
+
+@app.route('/webauthn/cadastro/verificar', methods=['POST'])
+def verificar_cadastro_webauthn():
+    nome = session.get("nome")
+    if not nome:
+        return resposta_webauthn_erro("Entre antes de cadastrar uma passkey.", 401)
+
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict) or not isinstance(dados.get("credential"), dict):
+        return resposta_webauthn_erro("Resposta WebAuthn inválida.", 400)
+    desafio = consome_desafio_webauthn(
+        str(dados.get("challenge_id", "")), "cadastro"
+    )
+    if desafio is None or desafio["nome"] != nome:
+        return resposta_webauthn_erro("Desafio inválido, expirado ou já utilizado.", 400)
+
+    rp_id, origin = configuracao_webauthn()
+    try:
+        verificacao = verify_registration_response(
+            credential=dados["credential"],
+            expected_challenge=base64url_to_bytes(desafio["challenge"]),
+            expected_rp_id=rp_id,
+            expected_origin=origin,
+            require_user_verification=True,
+        )
+    except (WebAuthnException, ValueError, TypeError, KeyError):
+        return resposta_webauthn_erro("Não foi possível validar esta passkey.", 400)
+
+    credential_id = bytes_para_base64url(verificacao.credential_id)
+    if any(item["credential_id"] == credential_id for item in PASSKEYS):
+        return resposta_webauthn_erro("Esta passkey já está cadastrada.", 409)
+    PASSKEYS.append({
+        "nome": nome,
+        "credential_id": credential_id,
+        "credential_public_key": bytes_para_base64url(verificacao.credential_public_key),
+        "sign_count": verificacao.sign_count,
+    })
+    salvar_passkeys()
+    return jsonify({"mensagem": "Passkey cadastrada com sucesso."}), 201
 
 
 @app.route('/painel')
@@ -246,7 +586,11 @@ def painel():
     nome = session.get('nome')
     if not nome:
         return redirect(url_for('index'))
-    return render_template('painel.html', nome=nome)
+    return render_template(
+        'painel.html',
+        nome=nome,
+        tem_passkey=any(passkey["nome"] == nome for passkey in PASSKEYS),
+    )
 
 
 @app.route('/gerar-link', methods=['GET', 'POST'])
